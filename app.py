@@ -154,7 +154,7 @@ def fetch_arxiv_literature(query: str, max_results: int = 8) -> tuple[str, str]:
         query = "machine learning" # Fallback safeguard
         
     safe_query = urllib.parse.quote(query)
-    url = f"http://export.arxiv.org/api/query?search_query=all:{safe_query}&start=0&max_results={max_results}&sortBy=relevance"
+    url = f"https://export.arxiv.org/api/query?search_query=all:{safe_query}&start=0&max_results={max_results}&sortBy=relevance"
     
     bibtex_entries = []
     abstract_summaries = []
