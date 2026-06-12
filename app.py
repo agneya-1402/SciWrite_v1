@@ -15,6 +15,10 @@ import matplotlib
 matplotlib.use('Agg')  # Force non-interactive backend to prevent GUI thread collision errors
 import matplotlib.pyplot as plt
 import os
+import urllib.request
+import urllib.parse
+import xml.etree.ElementTree as ET
+import time
 
 st.set_page_config(
     page_title="SciWrite AI",
@@ -141,14 +145,138 @@ def compute_section_targets(pages: int, two_col: bool) -> dict[str, int]:
     return {tag: max(80, int(total * w)) for tag, w in SECTION_WEIGHT.items()}
 
 
+def fetch_arxiv_literature(query: str, max_results: int = 8) -> tuple[str, str]:
+    """
+    Queries the live arXiv API. Returns a formatted BibTeX string of the results 
+    and a synthesized context string containing the real abstracts to ground the LLM.
+    """
+    if not query.strip():
+        query = "machine learning" # Fallback safeguard
+        
+    safe_query = urllib.parse.quote(query)
+    url = f"http://export.arxiv.org/api/query?search_query=all:{safe_query}&start=0&max_results={max_results}&sortBy=relevance"
+    
+    bibtex_entries = []
+    abstract_summaries = []
+    
+    try:
+        with urllib.request.urlopen(url, timeout=10) as response:
+            xml_data = response.read()
+            
+        root = ET.fromstring(xml_data)
+        ns = {'atom': 'http://www.w3.org/2005/Atom'}
+        
+        for i, entry in enumerate(root.findall('atom:entry', ns)):
+            # Extract Metadata
+            title = entry.find('atom:title', ns).text.replace('\n', ' ').strip()
+            summary = entry.find('atom:summary', ns).text.replace('\n', ' ').strip()
+            published = entry.find('atom:published', ns).text[:4] # Get Year
+            authors = [author.find('atom:name', ns).text for author in entry.findall('atom:author', ns)]
+            author_str = " and ".join(authors)
+            
+            # Generate clean citation key
+            last_name = authors[0].split()[-1].lower() if authors else "unknown"
+            first_word = re.sub(r'[^a-zA-Z0-9]', '', title.split()[0].lower())
+            cite_key = f"{last_name}{published}{first_word}"
+            
+            # Construct BibTeX
+            bibtex = textwrap.dedent(f"""
+            @article{{{cite_key},
+              title={{{title}}},
+              author={{{author_str}}},
+              journal={{arXiv preprint}},
+              year={{{published}}}
+            }}
+            """).strip()
+            
+            bibtex_entries.append(bibtex)
+            abstract_summaries.append(f"[{cite_key}] {title} ({published}): {summary}")
+            
+        return "\n\n".join(bibtex_entries), "\n\n".join(abstract_summaries)
+        
+    except Exception as e:
+        st.sidebar.warning(f"arXiv API fetch failed: {e}. Proceeding with minimal context.")
+        return "", ""
+
 # ─────────────────────────────────────────────────────────────────────────────
 # GEMINI
 # ─────────────────────────────────────────────────────────────────────────────
 
-def call_gemini(api_key: str, prompt: str) -> str:
+def call_gemini_with_retry(api_key: str, prompt: str, retries: int = 3) -> str:
+    """Executes Gemini API calls with exponential backoff for 503 High Demand errors."""
     client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
-    return response.text
+    for attempt in range(retries):
+        try:
+            response = client.models.generate_content(
+                model=GEMINI_MODEL, 
+                contents=prompt,
+                config=genai.types.GenerateContentConfig(temperature=0.2)
+            )
+            return response.text
+        except Exception as e:
+            if "503" in str(e) or "429" in str(e):
+                if attempt < retries - 1:
+                    time.sleep(2 ** attempt) # Exponential backoff: 1s, 2s, 4s...
+                    continue
+            raise e
+    return ""
+
+def clean_llm_latex_output(raw_output: str) -> str:
+    """
+    Removes structural markdown code-fences (e.g., ```latex ... ```)
+    that LLMs sometimes append to responses.
+    """
+    clean_text = raw_output.strip()
+    if clean_text.startswith("```"):
+        # Strip leading lines matching code fences
+        import re
+        clean_text = re.sub(r'^```[a-zA-Z]*\n', '', clean_text)
+        # Strip trailing code fence
+        clean_text = re.sub(r'\n```$', '', clean_text)
+    return clean_text.strip()
+
+
+def generate_section_prompt(
+    tag: str, title: str, arxiv_context: str, bibtex: str, 
+    user_notes: str, previous_sections: dict, target_words: int
+) -> str:
+    """Builds a highly targeted prompt for a SINGLE section, aware of prior context."""
+    
+    # Compile what has already been written so the LLM maintains flow
+    history = ""
+    if previous_sections:
+        history = "PREVIOUSLY GENERATED SECTIONS:\n"
+        for k, v in previous_sections.items():
+            history += f"--- {k} ---\n{v[:500]}... [truncated]\n\n"
+            
+    cite_keys = re.findall(r"@\w+\{(\w+),", bibtex)
+    cite_str = ", ".join(cite_keys) if cite_keys else "(none provided)"
+
+    return textwrap.dedent(f"""
+    You are an elite academic researcher. You are writing ONE specific section of a research paper.
+    
+    PAPER TITLE: {title}
+    CURRENT SECTION TO WRITE: {tag}
+    TARGET WORD COUNT: ~{target_words} words.
+    
+    REAL LITERATURE CONTEXT (Use these to ground your claims):
+    {arxiv_context}
+    
+    AVAILABLE CITATION KEYS: {cite_str}
+    
+    USER NOTES FOR THIS PAPER:
+    {user_notes}
+    
+    {history}
+    
+    INSTRUCTIONS:
+    1. Write ONLY the '{tag}' section. Do not write any other sections.
+    2. Write in formal, third-person academic LaTeX prose. 
+    3. Use \\cite{{key}} frequently and accurately based on the Literature Context provided.
+    4. Do not output standard markdown code fences (like ```latex). Output raw text.
+    5. Do not output the section header (e.g., no \\section{{{tag}}}), just the body paragraphs.
+    6. Ensure the narrative flows logically from the previously generated sections.
+    """).strip()
 
 
 def verify_and_enrich_bibliography(api_key: str, paper_title: str, keywords: str, user_bibtex: str) -> str:
@@ -309,142 +437,6 @@ def generate_overleaf_zip(
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PROMPT
-# ─────────────────────────────────────────────────────────────────────────────
-
-def build_prompt(
-    title: str, authors_df: pd.DataFrame, abstract_goals: str,
-    intro_bg: str, methodology: str, results: str, extra: str,
-    bibtex: str, keywords: str, venue: str,
-    section_targets: dict[str, int],
-) -> str:
-    author_lines = []
-    for _, r in authors_df.iterrows():
-        name = str(r.get("Name","")).strip()
-        if name:
-            author_lines.append(
-                f"  * {name}  |  {r.get('Affiliation','')}  |  {r.get('Email','')}"
-            )
-    author_block = "\n".join(author_lines) or "  * (not provided)"
-    cite_keys = re.findall(r"@\w+\{(\w+),", bibtex)
-    cite_str  = ", ".join(cite_keys) if cite_keys else "(none — invent plausible keys)"
-    target_lines = "\n".join(
-        f"  {tag:<28} -> minimum {wc:,} words"
-        for tag, wc in section_targets.items()
-    )
-    total_target = sum(section_targets.values())
-
-    return textwrap.dedent(f"""
-    ROLE
-    ----
-    You are a world-class academic researcher with 25+ years of experience
-    publishing in NeurIPS, ICML, ICLR, CVPR, Nature, Science, and IEEE
-    Transactions.  You write with exceptional precision, depth, and rigour.
-
-    PAPER METADATA
-    --------------
-    Title   : {title}
-    Venue   : {venue or "general academic journal"}
-    Keywords: {keywords or "(derive from context)"}
-    Authors :
-{author_block}
-
-    Available cite keys (use \\cite{{key}} liberally; invent keys if list is empty):
-    {cite_str}
-
-    RESEARCH NOTES  (expand into full academic prose)
-    -------------------------------------------------
-    [Abstract Goals & Contributions]
-    {abstract_goals or "(infer from title)"}
-
-    [Introduction Background & Motivation]
-    {intro_bg or "(write compelling intro from title)"}
-
-    [Methodology & Technical Approach]
-    {methodology or "(propose rigorous plausible methodology)"}
-
-    [Results, Data & Quantitative Findings]
-    {results or "(describe plausible results consistent with methodology)"}
-
-    [Additional Instructions]
-    {extra or "(none)"}
-
-    WORD-COUNT REQUIREMENTS  (HARD MINIMUMS — exceed, never fall short)
-    -------------------------------------------------------------------
-{target_lines}
-    TOTAL TARGET: {total_target:,} words across all sections combined.
-
-    WRITING STANDARDS
-    -----------------
-    1. DEPTH: Multi-paragraph treatment of every topic. Use precise numbers,
-       dataset names, model names, metrics. No vague generalisations.
-       Academic hedging: "it is noteworthy that", "this finding suggests",
-       "in contradistinction to", "a salient observation is that", etc.
-
-    2. CITATIONS: Use \\cite{{key}} after EVERY factual claim, comparison, and
-       method reference. Target 2-4 citations per paragraph in body sections.
-       Abstract and Acknowledgements: zero citations.
-
-    3. EQUATIONS: Methodology must contain AT LEAST 5 numbered equations using
-       \\begin{{equation}}...\\end{{equation}}.  Use inline $...$ for variables.
-       Deploy: \\mathbf{{}}, \\mathcal{{}}, \\mathbb{{}}, \\operatorname{{}},
-       \\text{{}}, \\frac{{}}{{}}, \\sum, \\prod, \\int, \\left(\\right), \\argmax, etc.
-
-    4. SUBSECTIONS: Use \\subsection{{Heading}} to organise every section longer
-       than 400 words.  Related Work must have 4+ thematic subsections.
-
-    5. TABLES: Results section must include at least 2 comparison tables using
-       booktabs style: \\toprule, \\midrule, \\bottomrule, \\caption{{}}, \\label{{}}.
-       Include columns for Method, Dataset/Metric, Score, Parameters, Notes.
-
-    6. ITEMIZE: Use \\begin{{itemize}} for lists of contributions, ablations, etc.
-
-    7. REGISTER: Formal third-person academic English. No contractions. No
-       informal language. No markdown anywhere.
-
-    OUTPUT FORMAT — ABSOLUTE RULES
-    --------------------------------
-    A. Output ONLY the 8 tagged sections below. Nothing before or after.
-    B. Every tag must be present with content, even if brief.
-    C. Tags are spelled EXACTLY: ABSTRACT, INTRODUCTION, RELATED_WORK,
-       METHODOLOGY, RESULTS_AND_ANALYSIS, DISCUSSION, CONCLUSION, ACKNOWLEDGEMENTS
-    D. Inside tags: raw LaTeX body text only.
-       - NO \\section{{}} commands (template adds them).
-       - NO \\begin{{document}}, no preamble.
-       - NO markdown — not a single backtick.
-       - NO ```latex fences or ``` of any kind.
-       - NO JSON or Python dicts.
-    E. \\subsection{{}} is ENCOURAGED inside body sections.
-    F. Do NOT truncate. Do NOT write "[continued...]". Write every word.
-
-    <ABSTRACT>
-    [Write here]
-    </ABSTRACT>
-    <INTRODUCTION>
-    [Write here]
-    </INTRODUCTION>
-    <RELATED_WORK>
-    [Write here]
-    </RELATED_WORK>
-    <METHODOLOGY>
-    [Write here]
-    </METHODOLOGY>
-    <RESULTS_AND_ANALYSIS>
-    [Write here]
-    </RESULTS_AND_ANALYSIS>
-    <DISCUSSION>
-    [Write here]
-    </DISCUSSION>
-    <CONCLUSION>
-    [Write here]
-    </CONCLUSION>
-    <ACKNOWLEDGEMENTS>
-    [Write here]
-    </ACKNOWLEDGEMENTS>
-
-    Begin writing now. Output only the 8 tagged sections.
-    """).strip()
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # JINJA2 + LATEX TEMPLATE
 # ─────────────────────────────────────────────────────────────────────────────
@@ -855,111 +847,104 @@ with tab_gen:
 
    # ── PIPELINE ───────────────────────────────────────────────────────────
     if gen_btn and can_gen:
-        # Initialize session states cleanly (including the new zip_payload key)
+        # Purge PDF keys entirely and init clean state
         for k in ["latex_src", "zip_payload", "sections", "gen_error", "word_counts", "total_words"]:
             st.session_state[k] = {} if k in ("sections", "word_counts") else (0 if k == "total_words" else None)
 
         sec_targets = compute_section_targets(target_pages, two_col)
         
-        progress = st.progress(0, text="Initializing SciWrite Pipeline...")
+        progress = st.progress(0, text="Initializing SciWrite Architecture...")
         status = st.empty()
 
-        # Step 1: Resolve Verified References (Grounded Search or Fixed User BibTeX)
-        status.markdown("**Step 1 / 4** &nbsp; Verifying & anchoring literature database...")
-        progress.progress(10, text="Searching for verified real-world citations...")
-        verified_bibtex = verify_and_enrich_bibliography(api_key, paper_title, paper_keywords, bibtex_entries)
-        progress.progress(25, text="Bibliography anchored securely.")
-
-        # Step 2: Handle Automated Matplotlib Data Visualization Rendering
-        status.markdown("**Step 2 / 4** &nbsp; Generating empirical figures via Matplotlib engines...")
-        generated_charts_list = []
+        # Step 1: ArXiv Literature Grounding
+        status.markdown("**Step 1 / 4** &nbsp; Fetching real-world literature from arXiv...")
+        search_query = f"{paper_title} {paper_keywords}"
+        real_bibtex, arxiv_summaries = fetch_arxiv_literature(search_query, max_results=6)
         
-        # Programmatically synthesize 2 distinct, highly applicable data figures based on user metrics
+        # Merge user bibtex with arXiv bibtex
+        combined_bibtex = f"{bibtex_entries}\n\n{real_bibtex}".strip()
+        progress.progress(15, text="Literature database anchored via arXiv API.")
+
+        # Step 2: Matplotlib Rendering
+        status.markdown("**Step 2 / 4** &nbsp; Rendering empirical data figures...")
+        generated_charts_list = []
         for idx in range(1, 3):
-            progress.progress(25 + (idx * 10), text=f"Rendering analytical chart matrix {idx}...")
+            progress.progress(15 + (idx * 5), text=f"Rendering analytical chart {idx}...")
             chart_asset = generate_academic_chart(api_key, paper_title, results_data, idx)
             if chart_asset:
-                generated_charts_list.append(chart_asset)  # Append structured (filename, bytes) tuple
-                
-        progress.progress(45, text="Experimental graphics compilation successful.")
+                generated_charts_list.append(chart_asset)
+        progress.progress(25, text="Experimental graphics compiled.")
 
-        # Step 3: Core Academic Text Synthesis (Gemini API with XML Extraction)
+        # Step 3: Sequential Academic Synthesis
+        status.markdown(f"**Step 3 / 4** &nbsp; Synthesizing ~{est:,} words sequentially...")
+        
+        sections_dict: dict[str, str] = {}
+        compiled_user_notes = f"Abstract: {abstract_goals}\nIntro: {intro_bg}\nMethod: {methodology_notes}\nResults: {results_data}\nExtra: {extra_notes}"
+        
         try:
-            status.markdown(f"**Step 3 / 4** &nbsp; Fabricating ~{est:,} words of rigorous research via Gemini...")
-            progress.progress(55, text="Streaming text segments from Gemini network...")
-            
-            raw = call_gemini(api_key, build_prompt(
-                title=paper_title, authors_df=authors_df,
-                abstract_goals=abstract_goals, intro_bg=intro_bg,
-                methodology=methodology_notes, results=results_data,
-                extra=extra_notes, bibtex=verified_bibtex,  # Pass the newly verified bibliography entries
-                keywords=paper_keywords, venue=venue,
-                section_targets=sec_targets,
-            ))
-            
-            progress.progress(75, text="Extracting structural XML markup blocks...")
-            
-            # Parse text payload cleanly using regular expression tag wrappers
-            sections: dict[str, str] = {}
-            missing: list[str] = []
-            for tag in SECTION_TAGS:
-                c = extract_xml_section(tag, raw)
-                sections[tag] = c
-                if not c:
-                    missing.append(tag)
-                    
-            wcs = {t: len(v.split()) for t, v in sections.items()}
-            total = sum(wcs.values())
-            st.session_state.update(sections=sections, word_counts=wcs, total_words=total)
-            
-            if missing:
-                st.warning(f"Structural segments missing from model response: {', '.join(missing)}. Formatted placeholders applied.", icon="⚠️")
+            total_sections = len(SECTION_TAGS)
+            for i, tag in enumerate(SECTION_TAGS):
+                progress_val = 25 + int(60 * ((i + 1) / total_sections))
+                progress.progress(progress_val, text=f"Drafting section: {tag}...")
                 
+                prompt = generate_section_prompt(
+                    tag=tag, 
+                    title=paper_title, 
+                    arxiv_context=arxiv_summaries, 
+                    bibtex=combined_bibtex, 
+                    user_notes=compiled_user_notes, 
+                    previous_sections=sections_dict, 
+                    target_words=sec_targets.get(tag, 300)
+                )
+                
+                # Execute with 503 protection
+                section_text = call_gemini_with_retry(api_key, prompt)
+                
+                # Clean up LLM artifacts
+                section_text = clean_llm_latex_output(section_text) if 'clean_llm_latex_output' in globals() else section_text.replace("```latex", "").replace("```", "").strip()
+                sections_dict[tag] = section_text
+                
+            # Update metrics
+            wcs = {t: len(v.split()) for t, v in sections_dict.items()}
+            total = sum(wcs.values())
+            st.session_state.update(sections=sections_dict, word_counts=wcs, total_words=total)
+            
         except Exception as e:
             st.session_state["gen_error"] = str(e)
-            st.error(f"Gemini Core Generation Failure: {e}", icon="❌")
+            st.error(f"Generation Pipeline Failure: {e}", icon="❌")
             st.stop()
 
-        # Step 4: Inject Figure Environments, Render Template & Export Overleaf ZIP
-        status.markdown("**Step 4 / 4** &nbsp; Packaging workspace directory architecture into ZIP...")
-        progress.progress(85, text="Structuring graphic environment vectors...")
+        # Step 4: Template Render & ZIP Export
+        status.markdown("**Step 4 / 4** &nbsp; Packaging Overleaf Project ZIP...")
+        progress.progress(90, text="Structuring graphic vectors and LaTeX templates...")
         
-        # Initialize dynamic layout parameters for figures array injection
         fig_list: list[dict] = []
-        
-        # Process and link user-uploaded figures if they exist
         for uf in (uploaded_figs or []):
             safe_name = re.sub(r"[^\w.\-]", "_", uf.name)
-            fig_list.append({"fn": safe_name, "cap": f"Empirical field observations and sample data configuration: {uf.name}"})
-            
-        # Process and link our freshly generated matplotlib figure arrays
+            fig_list.append({"fn": safe_name, "cap": f"Empirical field observations: {uf.name}"})
         for filename, _ in generated_charts_list:
-            fig_list.append({"fn": filename, "cap": f"Programmatic verification matrix detailing analytical experimental parameters."})
+            fig_list.append({"fn": filename, "cap": "Programmatic verification matrix detailing analytical experimental parameters."})
             
         try:
-            # Build final, complete LaTeX documentation string code
             latex_src = render_latex(
                 title=paper_title, authors_df=authors_df, two_col=two_col,
-                keywords=paper_keywords, sections=sections,
-                bibtex=verified_bibtex, figs=fig_list
+                keywords=paper_keywords, sections=sections_dict,
+                bibtex=combined_bibtex, figs=fig_list
             )
             st.session_state["latex_src"] = latex_src
             
-            # Package all files into an in-memory streaming zip binary payload
-            zip_payload = generate_overleaf_zip(latex_src, verified_bibtex, uploaded_figs, generated_charts_list)
+            zip_payload = generate_overleaf_zip(latex_src, combined_bibtex, uploaded_figs, generated_charts_list)
             st.session_state["zip_payload"] = zip_payload
             
         except jinja2.TemplateError as je:
             st.error(f"LaTeX Template Interpolation Error: {je}")
             st.stop()
             
-        # Complete progress loops and notify user of success state
         progress.progress(100, text="Compilation Pipeline Complete.")
         status.empty()
         progress.empty()
         
-        st.success(f"🚀 Project successfully structured! {total:,} words generated. Overleaf ZIP archive is ready for production download.", icon="🎉")
-
+        st.success(f"🚀 Project successfully structured! {total:,} words drafted. Overleaf ZIP archive is ready for production download.", icon="🎉")
 
     # ── OUTPUT PANEL ───────────────────────────────────────────────────────
     if st.session_state.get("latex_src"):
@@ -1021,14 +1006,6 @@ with tab_gen:
             st.caption("Click 'Upload' on Overleaf and drag the Project ZIP bundle straight in.")
             st.markdown('</div>', unsafe_allow_html=True)
 
-        # PDF preview
-        if pdf_bytes:
-            with st.expander("&#128270;  Preview PDF (inline)", expanded=True):
-                b64 = base64.b64encode(pdf_bytes).decode("utf-8")
-                st.markdown(
-                    f'<iframe src="data:application/pdf;base64,{b64}" '
-                    f'width="100%" height="860px" style="border:none;border-radius:10px;"></iframe>',
-                    unsafe_allow_html=True)
 
         # Section prose preview
         with st.expander("&#128209;  Preview generated sections", expanded=False):
