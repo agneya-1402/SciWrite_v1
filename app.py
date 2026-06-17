@@ -1,4 +1,7 @@
 import os
+# Force matplotlib to use the writable /tmp directory for its cache
+os.environ["MPLCONFIGDIR"] = "/tmp"
+
 import re
 import io
 import time
@@ -148,7 +151,10 @@ def generate_section_prompt(tag, title, arxiv_context, bibtex, user_notes, venue
 
 def generate_academic_chart(api_key: str, paper_title: str, results_notes: str, figure_index: int):
     client = genai.Client(api_key=api_key)
-    chart_filename = f"generated_chart_{figure_index}.png"
+    
+    # CRITICAL VERCEL FIX: Must write to /tmp
+    chart_filename = f"/tmp/generated_chart_{figure_index}.png" 
+    
     prompt = f"""
     Write an isolated Python script using matplotlib to generate a publication-quality chart.
     Title: {paper_title}
@@ -167,14 +173,20 @@ def generate_academic_chart(api_key: str, paper_title: str, results_notes: str, 
         clean_code = res.text.strip().replace("```python", "").replace("```", "")
         local_scope = {"plt": plt, "pd": pd, "re": re}
         plt.close('all')
+        
+        # Execute the LLM's code
         exec(clean_code, globals(), local_scope)
+        
+        # Read the file back from /tmp
         if os.path.exists(chart_filename):
             with open(chart_filename, "rb") as f:
                 img_bytes = f.read()
-            os.remove(chart_filename)
+            os.remove(chart_filename) # Clean up the tmp file
             plt.close('all')
-            return chart_filename, img_bytes
-    except Exception:
+            # Return just the base filename for the zip/latex process
+            return f"generated_chart_{figure_index}.png", img_bytes
+    except Exception as e:
+        print(f"Chart Gen Error: {e}")
         plt.close('all')
         return None
 
