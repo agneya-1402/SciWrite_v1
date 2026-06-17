@@ -1,248 +1,123 @@
-# =============================================================================
-# SciWrite AI  v2.0  —  Production-Grade Research Paper Generator
-# =============================================================================
-from __future__ import annotations
-import re, textwrap, tempfile, subprocess, base64
-from pathlib import Path
-from typing import Optional
-import streamlit as st
-import pandas as pd
-import jinja2
-from google import genai
-import io
-import zipfile
-import matplotlib
-matplotlib.use('Agg')  # Force non-interactive backend to prevent GUI thread collision errors
-import matplotlib.pyplot as plt
 import os
+import re
+import io
+import time
+import json
+import zipfile
+import textwrap
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
-import time
 
-st.set_page_config(
-    page_title="SciWrite AI",
-    page_icon="🔬",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+from flask import Flask, render_template, request, jsonify, send_file
+from werkzeug.utils import secure_filename
+from dotenv import load_dotenv
+from google import genai
+import pandas as pd
+import jinja2
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CSS
-# ─────────────────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:wght@700&display=swap');
-*,*::before,*::after{box-sizing:border-box}
-html,body,[data-testid="stAppViewContainer"]{background:#080b14!important;font-family:'Inter',sans-serif;color:#c9d1e0}
-[data-testid="stSidebar"]{background:#0d1020!important;border-right:1px solid rgba(255,255,255,0.06)!important;padding-top:0!important}
-[data-testid="stSidebar"]>div:first-child{padding-top:0}
-.sci-logo{display:flex;align-items:center;gap:10px;padding:22px 20px 16px;border-bottom:1px solid rgba(255,255,255,0.06);margin-bottom:18px}
-.sci-logo-icon{width:34px;height:34px;background:linear-gradient(135deg,#5b8df5,#9b5de5);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px}
-.sci-logo-text{font-size:1.05rem;font-weight:700;color:#eef0f8;letter-spacing:-0.01em}
-.sci-logo-badge{font-size:0.58rem;font-weight:600;background:linear-gradient(90deg,#5b8df5,#9b5de5);color:#fff;padding:2px 7px;border-radius:20px;letter-spacing:0.08em;text-transform:uppercase}
-.sb-label{font-size:0.67rem;font-weight:700;letter-spacing:0.15em;text-transform:uppercase;color:#3d4566;padding:14px 20px 5px}
-.hero-wrap{padding:36px 0 24px;border-bottom:1px solid rgba(255,255,255,0.05);margin-bottom:28px}
-.hero-eyebrow{font-size:0.7rem;font-weight:700;letter-spacing:0.2em;text-transform:uppercase;color:#5b8df5;margin-bottom:10px}
-.hero-h1{font-family:'Playfair Display',Georgia,serif;font-size:2.6rem;font-weight:700;line-height:1.1;background:linear-gradient(135deg,#d4deff 0%,#a78bfa 50%,#f472b6 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-bottom:10px}
-.hero-sub{font-size:1rem;color:#5a6380;max-width:620px;line-height:1.6}
-.stat-row{display:flex;gap:12px;flex-wrap:wrap;margin-top:22px}
-.stat-pill{display:inline-flex;align-items:center;gap:7px;background:rgba(91,141,245,0.08);border:1px solid rgba(91,141,245,0.2);border-radius:20px;padding:5px 13px;font-size:0.78rem;font-weight:500;color:#7ba4f5}
-[data-testid="stTabs"] [data-baseweb="tab-list"]{gap:0;background:transparent;border-bottom:1px solid rgba(255,255,255,0.07);padding-bottom:0}
-[data-testid="stTabs"] button[data-baseweb="tab"]{font-size:0.8rem!important;font-weight:600!important;letter-spacing:0.05em!important;text-transform:uppercase!important;color:#3d4566!important;padding:10px 20px!important;border-bottom:2px solid transparent!important;background:transparent!important;border-radius:0!important;transition:color 0.15s,border-color 0.15s!important}
-[data-testid="stTabs"] button[data-baseweb="tab"]:hover{color:#7ba4f5!important}
-[data-testid="stTabs"] button[aria-selected="true"][data-baseweb="tab"]{color:#a78bfa!important;border-bottom:2px solid #a78bfa!important}
-.sec-header{display:flex;align-items:center;gap:9px;margin-bottom:18px}
-.sec-icon{width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0}
-.sec-icon-blue{background:rgba(91,141,245,0.15)}
-.sec-icon-purple{background:rgba(155,93,229,0.15)}
-.sec-icon-green{background:rgba(52,211,153,0.15)}
-.sec-icon-pink{background:rgba(244,114,182,0.15)}
-.sec-title{font-size:1rem;font-weight:600;color:#c9d1e0}
-.sec-sub{font-size:0.78rem;color:#404866;margin-top:1px}
-.card{background:#0f1322;border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:20px 22px;margin-bottom:16px}
-.card-sm{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.05);border-radius:9px;padding:14px 16px;margin-bottom:12px}
-.stTextInput label,.stTextArea label,.stSelectbox label,.stSlider label,.stNumberInput label,.stRadio label,.stMultiSelect label{font-size:0.78rem!important;font-weight:600!important;letter-spacing:0.05em!important;text-transform:uppercase!important;color:#4f5878!important;margin-bottom:4px!important}
-.stTextInput input,.stTextArea textarea{background:#0f1322!important;border:1px solid rgba(255,255,255,0.08)!important;border-radius:8px!important;color:#c9d1e0!important;font-size:0.87rem!important;transition:border-color 0.15s!important}
-.stTextInput input:focus,.stTextArea textarea:focus{border-color:rgba(91,141,245,0.5)!important;box-shadow:0 0 0 3px rgba(91,141,245,0.08)!important}
-.stSelectbox>div>div{background:#0f1322!important;border:1px solid rgba(255,255,255,0.08)!important;border-radius:8px!important;color:#c9d1e0!important}
-div.stButton>button{background:linear-gradient(135deg,#4f78d6 0%,#7c3aed 100%)!important;color:#fff!important;border:none!important;border-radius:9px!important;padding:0.6rem 1.8rem!important;font-size:0.88rem!important;font-weight:700!important;letter-spacing:0.04em!important;transition:opacity 0.2s,transform 0.1s!important;box-shadow:0 4px 20px rgba(124,58,237,0.3)!important}
-div.stButton>button:hover:not(:disabled){opacity:0.92!important;transform:translateY(-1px)!important}
-div.stButton>button:disabled{opacity:0.35!important;box-shadow:none!important;cursor:not-allowed!important}
-div.stDownloadButton>button{background:#0f1322!important;color:#7ba4f5!important;border:1px solid rgba(91,141,245,0.3)!important;border-radius:9px!important;font-weight:600!important;transition:all 0.15s!important}
-div.stDownloadButton>button:hover{background:rgba(91,141,245,0.1)!important;border-color:#7ba4f5!important;transform:translateY(-1px)!important}
-.stProgress>div>div{background:linear-gradient(90deg,#5b8df5,#9b5de5)!important;border-radius:4px!important}
-[data-testid="stAlert"]{border-radius:10px!important;font-size:0.85rem!important}
-.streamlit-expanderHeader{font-size:0.8rem!important;font-weight:600!important;color:#5a6380!important;background:transparent!important;border-radius:8px!important}
-.stCode{border-radius:10px!important;font-size:0.75rem!important}
-pre{background:#080b14!important}
-[data-testid="stDataFrameContainer"]{border-radius:10px!important}
-hr{border-color:rgba(255,255,255,0.05)!important}
-.gen-status-bar{display:flex;align-items:center;gap:10px;background:rgba(52,211,153,0.08);border:1px solid rgba(52,211,153,0.25);border-radius:10px;padding:12px 16px;margin-bottom:20px}
-.gen-status-dot{width:8px;height:8px;border-radius:50%;background:#34d399;box-shadow:0 0 8px #34d399;flex-shrink:0}
-.gen-status-text{font-size:0.82rem;font-weight:600;color:#34d399}
-.gen-status-meta{font-size:0.78rem;color:#404866;margin-left:auto}
-.dl-card{background:#0f1322;border:1px solid rgba(255,255,255,0.07);border-radius:12px;padding:18px 20px}
-.dl-card-title{font-size:0.85rem;font-weight:700;color:#c9d1e0;margin-bottom:4px}
-.dl-card-meta{font-size:0.75rem;color:#404866;margin-bottom:14px}
-.overleaf-cta{display:inline-flex;align-items:center;gap:8px;background:rgba(71,181,75,0.1);border:1px solid rgba(71,181,75,0.3);border-radius:8px;padding:8px 14px;font-size:0.78rem;font-weight:600;color:#47b54b;text-decoration:none}
-</style>
-""", unsafe_allow_html=True)
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONSTANTS
-# ─────────────────────────────────────────────────────────────────────────────
+load_dotenv()
+
+app = Flask(__name__, template_folder='templates')
+
 GEMINI_MODEL = "gemini-2.5-flash-lite"
-
 SECTION_TAGS = [
     "ABSTRACT", "INTRODUCTION", "RELATED_WORK", "METHODOLOGY",
     "RESULTS_AND_ANALYSIS", "DISCUSSION", "CONCLUSION", "ACKNOWLEDGEMENTS",
 ]
-
 WORDS_PER_PAGE_SINGLE = 450
 WORDS_PER_PAGE_DOUBLE = 600
-
-SECTION_WEIGHT: dict[str, float] = {
-    "ABSTRACT":             0.05,
-    "INTRODUCTION":         0.16,
-    "RELATED_WORK":         0.14,
-    "METHODOLOGY":          0.22,
-    "RESULTS_AND_ANALYSIS": 0.20,
-    "DISCUSSION":           0.12,
-    "CONCLUSION":           0.07,
-    "ACKNOWLEDGEMENTS":     0.04,
+SECTION_WEIGHT = {
+    "ABSTRACT": 0.05, "INTRODUCTION": 0.16, "RELATED_WORK": 0.14,
+    "METHODOLOGY": 0.22, "RESULTS_AND_ANALYSIS": 0.20, "DISCUSSION": 0.12,
+    "CONCLUSION": 0.07, "ACKNOWLEDGEMENTS": 0.04,
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# UTILITIES
-# ─────────────────────────────────────────────────────────────────────────────
+# --- Utilities ---
 
 def escape_for_latex(text: str) -> str:
-    """Escape special LaTeX chars in user-supplied strings only."""
-    if not isinstance(text, str):
-        text = str(text)
-    text = text.replace("\\", r"\textbackslash{}")
-    text = text.replace("&",  r"\&")
-    text = text.replace("%",  r"\%")
-    text = text.replace("$",  r"\$")
-    text = text.replace("#",  r"\#")
-    text = text.replace("_",  r"\_")
-    text = text.replace("{",  r"\{")
-    text = text.replace("}",  r"\}")
-    text = text.replace("~",  r"\textasciitilde{}")
-    text = text.replace("^",  r"\textasciicircum{}")
+    text = str(text)
+    replacements = {
+        "\\": r"\textbackslash{}", "&": r"\&", "%": r"\%", "$": r"\$",
+        "#": r"\#", "_": r"\_", "{": r"\{", "}": r"\}", "~": r"\textasciitilde{}", "^": r"\textasciicircum{}"
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
     return text
 
-
-def extract_xml_section(tag: str, raw: str) -> str:
-    m = re.search(rf"<{tag}>(.*?)</{tag}>", raw, re.DOTALL | re.IGNORECASE)
-    return m.group(1).strip() if m else ""
-
-
-def compute_section_targets(pages: int, two_col: bool) -> dict[str, int]:
-    wpp = WORDS_PER_PAGE_DOUBLE if two_col else WORDS_PER_PAGE_SINGLE
-    total = pages * wpp
-    return {tag: max(80, int(total * w)) for tag, w in SECTION_WEIGHT.items()}
-
-
-def fetch_arxiv_literature(query: str, max_results: int = 8) -> tuple[str, str]:
-    """
-    Queries the live arXiv API. Returns a formatted BibTeX string of the results 
-    and a synthesized context string containing the real abstracts to ground the LLM.
-    """
-    if not query.strip():
-        query = "machine learning" # Fallback safeguard
+def compute_section_targets(mode: str, value: int, two_col: bool) -> dict:
+    if mode == "pages":
+        wpp = WORDS_PER_PAGE_DOUBLE if two_col else WORDS_PER_PAGE_SINGLE
+        total_words = value * wpp
+    else:
+        total_words = value
         
+    return {tag: max(80, int(total_words * w)) for tag, w in SECTION_WEIGHT.items()}
+
+def fetch_arxiv_literature(query: str, max_results: int = 6):
+    if not query.strip(): query = "machine learning"
     safe_query = urllib.parse.quote(query)
     url = f"https://export.arxiv.org/api/query?search_query=all:{safe_query}&start=0&max_results={max_results}&sortBy=relevance"
     
-    bibtex_entries = []
-    abstract_summaries = []
-    
+    bibtex_entries, abstract_summaries = [], []
     try:
         with urllib.request.urlopen(url, timeout=10) as response:
             xml_data = response.read()
-            
         root = ET.fromstring(xml_data)
         ns = {'atom': 'http://www.w3.org/2005/Atom'}
         
-        for i, entry in enumerate(root.findall('atom:entry', ns)):
-            # Extract Metadata
+        for entry in root.findall('atom:entry', ns):
             title = entry.find('atom:title', ns).text.replace('\n', ' ').strip()
             summary = entry.find('atom:summary', ns).text.replace('\n', ' ').strip()
-            published = entry.find('atom:published', ns).text[:4] # Get Year
-            authors = [author.find('atom:name', ns).text for author in entry.findall('atom:author', ns)]
+            published = entry.find('atom:published', ns).text[:4]
+            authors = [a.find('atom:name', ns).text for a in entry.findall('atom:author', ns)]
             author_str = " and ".join(authors)
             
-            # Generate clean citation key
             last_name = authors[0].split()[-1].lower() if authors else "unknown"
             first_word = re.sub(r'[^a-zA-Z0-9]', '', title.split()[0].lower())
             cite_key = f"{last_name}{published}{first_word}"
             
-            # Construct BibTeX
             bibtex = textwrap.dedent(f"""
             @article{{{cite_key},
               title={{{title}}},
               author={{{author_str}}},
               journal={{arXiv preprint}},
               year={{{published}}}
-            }}
-            """).strip()
-            
+            }}""").strip()
             bibtex_entries.append(bibtex)
             abstract_summaries.append(f"[{cite_key}] {title} ({published}): {summary}")
-            
         return "\n\n".join(bibtex_entries), "\n\n".join(abstract_summaries)
-        
-    except Exception as e:
-        st.sidebar.warning(f"arXiv API fetch failed: {e}. Proceeding with minimal context.")
+    except Exception:
         return "", ""
 
-# ─────────────────────────────────────────────────────────────────────────────
-# GEMINI
-# ─────────────────────────────────────────────────────────────────────────────
-
 def call_gemini_with_retry(api_key: str, prompt: str, retries: int = 3) -> str:
-    """Executes Gemini API calls with exponential backoff for 503 High Demand errors."""
     client = genai.Client(api_key=api_key)
     for attempt in range(retries):
         try:
-            response = client.models.generate_content(
-                model=GEMINI_MODEL, 
-                contents=prompt,
+            res = client.models.generate_content(
+                model=GEMINI_MODEL, contents=prompt,
                 config=genai.types.GenerateContentConfig(temperature=0.2)
             )
-            return response.text
+            return res.text
         except Exception as e:
             if "503" in str(e) or "429" in str(e):
                 if attempt < retries - 1:
-                    time.sleep(2 ** attempt) # Exponential backoff: 1s, 2s, 4s...
+                    time.sleep(2 ** attempt)
                     continue
             raise e
     return ""
 
 def clean_llm_latex_output(raw_output: str) -> str:
-    """
-    Removes structural markdown code-fences (e.g., ```latex ... ```)
-    that LLMs sometimes append to responses.
-    """
     clean_text = raw_output.strip()
-    if clean_text.startswith("```"):
-        # Strip leading lines matching code fences
-        import re
-        clean_text = re.sub(r'^```[a-zA-Z]*\n', '', clean_text)
-        # Strip trailing code fence
-        clean_text = re.sub(r'\n```$', '', clean_text)
+    clean_text = re.sub(r'^```[a-zA-Z]*\n', '', clean_text)
+    clean_text = re.sub(r'\n```$', '', clean_text)
     return clean_text.strip()
 
-
-def generate_section_prompt(
-    tag: str, title: str, arxiv_context: str, bibtex: str, 
-    user_notes: str, previous_sections: dict, target_words: int
-) -> str:
-    """Builds a highly targeted prompt for a SINGLE section, aware of prior context."""
-    
-    # Compile what has already been written so the LLM maintains flow
+def generate_section_prompt(tag, title, arxiv_context, bibtex, user_notes, venue, previous_sections, target_words):
     history = ""
     if previous_sections:
         history = "PREVIOUSLY GENERATED SECTIONS:\n"
@@ -253,251 +128,79 @@ def generate_section_prompt(
     cite_str = ", ".join(cite_keys) if cite_keys else "(none provided)"
 
     return textwrap.dedent(f"""
-    You are an elite academic researcher. You are writing ONE specific section of a research paper.
-    
+    You are an elite academic researcher writing a paper for {venue}. 
+    You are writing ONE specific section of a research paper.
     PAPER TITLE: {title}
     CURRENT SECTION TO WRITE: {tag}
     TARGET WORD COUNT: ~{target_words} words.
-    
-    REAL LITERATURE CONTEXT (Use these to ground your claims):
-    {arxiv_context}
-    
+    REAL LITERATURE CONTEXT: {arxiv_context}
     AVAILABLE CITATION KEYS: {cite_str}
-    
-    USER NOTES FOR THIS PAPER:
-    {user_notes}
-    
+    USER NOTES FOR THIS PAPER: {user_notes}
     {history}
-    
     INSTRUCTIONS:
     1. Write ONLY the '{tag}' section. Do not write any other sections.
-    2. Write in formal, third-person academic LaTeX prose. 
-    3. Use \\cite{{key}} frequently and accurately based on the Literature Context provided.
-    4. Do not output standard markdown code fences (like ```latex). Output raw text.
-    5. Do not output the section header (e.g., no \\section{{{tag}}}), just the body paragraphs.
+    2. Write in formal, third-person academic LaTeX prose suitable for {venue}.
+    3. Use \\cite{{key}} frequently and accurately based on the Literature Context.
+    4. Do not output markdown code fences. Output raw text.
+    5. Do not output the section header (e.g., no \\section{{{tag}}}).
     6. Ensure the narrative flows logically from the previously generated sections.
     """).strip()
 
-
-def verify_and_enrich_bibliography(api_key: str, paper_title: str, keywords: str, user_bibtex: str) -> str:
-    """
-    Ensures zero hallucinated citations. If user BibTeX exists, locks the model down to those keys.
-    Otherwise, invokes Google Search grounding features via Gemini to fetch verifiable, 
-    historically accurate literature.
-    """
-    if user_bibtex.strip():
-        # If user supplied a bibliography, we enforce a strict prompt constraint to use ONLY those keys
-        return user_bibtex.strip()
-        
+def generate_academic_chart(api_key: str, paper_title: str, results_notes: str, figure_index: int):
     client = genai.Client(api_key=api_key)
-    
-    # Target search constraints to assemble foundational literature citations
-    grounding_prompt = f"""
-    Find 4 genuine, highly-cited academic research papers relevant to this domain to construct a BibTeX library.
-    
-    Domain Context:
-    Title: {paper_title}
-    Keywords: {keywords}
-    
-    CRITICAL GROUNDING REQUIREMENTS:
-    1. Do NOT invent or guess references. Every paper must be a real, verifiable publication indexed in Google Scholar, IEEE, or arXiv.
-    2. Format the response strictly as a single text block containing valid BibTeX records.
-    3. Ensure every record includes author, title, journal/booktitle, volume, year, and a clean alphanumeric citation key.
-    4. Output ONLY valid BibTeX syntax. No markdown wrappers, no explanations.
-    """
-    
-    try:
-        # Utilize Gemini with Google Search tool integration to pull factual live records
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=grounding_prompt,
-            config=genai.types.GenerateContentConfig(
-                temperature=0.0, # Zero variance for deterministic research matching
-                tools=[{"google_search": {}}],
-                system_instruction="You are a strict citation validation agent. You output true, verifiable academic BibTeX data blocks only."
-            )
-        )
-        
-        clean_bib = response.text.strip().replace("```bibtex", "").replace("```", "")
-        return clean_bib
-        
-    except Exception:
-        # Graceful fallback to baseline classic papers to protect compiler loops from breaks
-        return textwrap.dedent("""
-        @article{vaswani2017attention,
-          title={Attention is all you need},
-          author={Vaswani, Ashish and Shazeer, Noam and Parmar, Niki and Uszkoreit, Jakob and Jones, Llion and Gomez, Aidan N and Kaiser, {\L}ukasz and Polosukhin, Illia},
-          journal={Advances in neural information processing systems},
-          volume={30},
-          year={2017}
-        }
-        """).strip()
-
-def generate_academic_chart(api_key: str, paper_title: str, results_notes: str, figure_index: int) -> tuple[str, bytes] | None:
-    """
-    Utilizes Gemini to write automated Python data visualization code based on user inputs,
-    safely executes the code in a restricted scope, and captures the resulting plot as bytes.
-    """
-    client = genai.Client(api_key=api_key)
-    
     chart_filename = f"generated_chart_{figure_index}.png"
-    
     prompt = f"""
-    You are an expert Data Scientist and Academic typesetter. Write an isolated Python script using matplotlib to generate a publication-quality chart for a research paper.
-    
-    PAPER CONTEXT:
+    Write an isolated Python script using matplotlib to generate a publication-quality chart.
     Title: {paper_title}
-    Experimental Results Data: {results_notes}
+    Data: {results_notes}
     Target Figure Filename: {chart_filename}
-    
-    CRITICAL DESIGN REQUIREMENTS:
-    1. Aesthetics: Use a clean academic style. Set dark grey or black gridlines, clear legible labels, axis titles, and a descriptive legend if applicable.
-    2. Data: Translate the user's unstructured metrics into explicit arrays or dataframes within the script.
-    3. Output: The script MUST save the file to the exact path string: '{chart_filename}' using plt.savefig('{chart_filename}', dpi=300, bbox_inches='tight').
-    4. Safety: Do NOT use plt.show(). Use plt.close('all') at the absolute end of the execution string.
-    5. Formatting: Output ONLY raw executable Python code. No markdown formatting. No ```python blocks. No explanations.
+    REQUIREMENTS:
+    1. Output ONLY raw executable Python code. No markdown.
+    2. Save file exactly as '{chart_filename}' using plt.savefig.
+    3. Use plt.close('all') at the end. Do not use plt.show().
     """
-    
     try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=genai.types.GenerateContentConfig(
-                temperature=0.1,
-                system_instruction="You are an automated Python script generator that outputs raw executable code strings with zero markdown encapsulation."
-            )
+        res = client.models.generate_content(
+            model="gemini-2.5-flash", contents=prompt,
+            config=genai.types.GenerateContentConfig(temperature=0.1)
         )
-        
-        clean_code = response.text.strip().replace("```python", "").replace("```", "")
-        
-        # Create an isolated local execution scope to evaluate code steps safely
-        local_scope = {
-            "plt": plt,
-            "pd": pd,
-            "re": re
-        }
-        
-        # Clear out prior graphics cache artifacts safely before rendering operations
+        clean_code = res.text.strip().replace("```python", "").replace("```", "")
+        local_scope = {"plt": plt, "pd": pd, "re": re}
         plt.close('all')
-        
-        # Execute chart construction script internally
         exec(clean_code, globals(), local_scope)
-        
-        # Verify and capture file data from local operating context
         if os.path.exists(chart_filename):
             with open(chart_filename, "rb") as f:
                 img_bytes = f.read()
-            # Clean up local filesystem residue
             os.remove(chart_filename)
             plt.close('all')
             return chart_filename, img_bytes
-            
-    except Exception as e:
-        st.sidebar.error(f"Chart Engine Failure on Asset {figure_index}: {str(e)}")
+    except Exception:
         plt.close('all')
         return None
-
-
-def generate_overleaf_zip(
-    latex_src: str, 
-    bibtex_data: str, 
-    uploaded_figs: list, 
-    generated_figs: list[tuple[str, bytes]]
-) -> bytes:
-    """
-    Packages the entire document ecosystem (.tex, .bib, and all binary graphics)
-    into a structured, memory-isolated ZIP stream optimized for immediate Overleaf imports.
-    """
-    zip_buffer = io.BytesIO()
-    
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        # Write primary LaTeX Document Source
-        zip_file.writestr("main.tex", latex_src)
-        
-        # Write localized Bibliography Database
-        if bibtex_data.strip():
-            zip_file.writestr("references.bib", bibtex_data.strip())
-            
-        # Process and write User-Uploaded Figure Assets
-        if uploaded_figs:
-            for uf in uploaded_figs:
-                safe_name = re.sub(r"[^\w.\-]", "_", uf.name)
-                # Ensure data cursor is reset before read operations
-                uf.seek(0)
-                zip_file.writestr(safe_name, uf.read())
-                
-        # Process and write Programmatically Generated Matplotlib Figures
-        if generated_figs:
-            for filename, img_bytes in generated_figs:
-                zip_file.writestr(filename, img_bytes)
-                
-    zip_buffer.seek(0)
-    return zip_buffer.getvalue()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PROMPT
-# ─────────────────────────────────────────────────────────────────────────────
-# JINJA2 + LATEX TEMPLATE
-# ─────────────────────────────────────────────────────────────────────────────
-
-def make_jinja_env() -> jinja2.Environment:
-    return jinja2.Environment(
-        block_start_string="[%", block_end_string="%]",
-        variable_start_string="[[", variable_end_string="]]",
-        comment_start_string="[#", comment_end_string="#]",
-        trim_blocks=True, lstrip_blocks=True,
-        autoescape=False, undefined=jinja2.Undefined,
-    )
 
 LATEX_TMPL = r"""
 \documentclass[11pt[% if two_col %],twocolumn[% endif %]]{article}
 \usepackage[T1]{fontenc}
 \usepackage[utf8]{inputenc}
-\usepackage{lmodern}
-\usepackage{microtype}
-\usepackage{amsmath,amssymb,amsfonts,mathtools,bm}
-\usepackage[
-[% if two_col %]
-    letterpaper,top=0.9in,bottom=0.9in,left=0.65in,right=0.65in,columnsep=18pt,
-[% else %]
-    letterpaper,top=1in,bottom=1in,left=1.1in,right=1.1in,
-[% endif %]
-]{geometry}
-\usepackage{graphicx,booktabs,tabularx,multirow,array,float}
-\usepackage[numbers,sort&compress]{natbib}
-\usepackage{hyperref,url}
-\hypersetup{colorlinks=true,linkcolor=blue!65!black,citecolor=green!55!black,urlcolor=blue!75!black,
-    pdftitle={[[ escaped_title ]]},pdfauthor={[[ first_author ]]},pdfkeywords={[[ escaped_kw ]]}}
-\usepackage{parskip,setspace,titlesec,abstract,authblk,fancyhdr,xcolor,soul}
-\usepackage{algorithm,algpseudocode}
-\titleformat{\section}{\large\bfseries\scshape}{}{0em}{}[\vspace{-2pt}\rule{\linewidth}{0.5pt}\vspace{2pt}]
-\titleformat{\subsection}{\normalsize\bfseries}{}{0em}{}
-\titlespacing*{\section}{0pt}{14pt}{6pt}
-\titlespacing*{\subsection}{0pt}{10pt}{4pt}
-\pagestyle{fancy}\fancyhf{}
-\renewcommand{\headrulewidth}{0.35pt}
-\fancyhead[L]{\small\scshape\textcolor{gray}{[[ short_title ]]}}
-\fancyhead[R]{\small\textcolor{gray}{\thepage}}
-\fancyfoot[C]{\small\textcolor{gray!60}{Generated by SciWrite AI \textperiodcentered{} \today}}
-\renewcommand{\abstractname}{\normalsize\bfseries\scshape Abstract}
-\setlength{\absleftindent}{0pt}\setlength{\absrightindent}{0pt}
+\usepackage{geometry}
+\geometry{[% if two_col %]letterpaper,margin=0.7in,columnsep=18pt[% else %]letterpaper,margin=1in[% endif %]}
+\usepackage{graphicx,hyperref,titlesec,authblk,xcolor}
+\usepackage[numbers]{natbib}
 \title{\vspace{-1.5em}\Large\bfseries [[ escaped_title ]]%
-[% if kw_raw %]\\\vspace{0.3em}\normalsize\normalfont\textit{Keywords:}\ \small [[ escaped_kw ]][% endif %]}
+[% if kw_raw %]\\\vspace{0.3em}\normalsize\textit{Keywords:}\ \small [[ escaped_kw ]][% endif %]}
 [% for a in authors %]
-\author[[[ loop.index ]]]{\textbf{[[ a.name ]]}[% if a.email %]\thanks{\href{mailto:[[ a.email ]]}{[[ a.email ]]}}\vspace{-0.5em}[% endif %]}
+\author[[[ loop.index ]]]{\textbf{[[ a.name ]]}[% if a.email %]\thanks{\href{mailto:[[ a.email ]]}{[[ a.email ]]}}[% endif %]}
 \affil[[[ loop.index ]]]{\small\textit{[[ a.affil ]]}}
 [% endfor %]
 \date{\today}
 \begin{document}
-\maketitle\thispagestyle{fancy}
+\maketitle
 \begin{abstract}\noindent [[ sec.ABSTRACT ]]\end{abstract}
-[% if two_col %]\vspace{0.5em}\noindent\rule{\linewidth}{0.3pt}\vspace{0.2em}[% endif %]
-\section{Introduction}
+\section{Introduction}\label{sec:intro}
 [[ sec.INTRODUCTION ]]
-\section{Related Work}
+\section{Related Work}\label{sec:related}
 [[ sec.RELATED_WORK ]]
-\section{Methodology}
+\section{Methodology}\label{sec:method}
 [[ sec.METHODOLOGY ]]
 [% if figs %]
 [% for f in figs %]
@@ -507,11 +210,11 @@ LATEX_TMPL = r"""
 \end{figure}
 [% endfor %]
 [% endif %]
-\section{Results and Analysis}
+\section{Results and Analysis}\label{sec:results}
 [[ sec.RESULTS_AND_ANALYSIS ]]
-\section{Discussion}
+\section{Discussion}\label{sec:disc}
 [[ sec.DISCUSSION ]]
-\section{Conclusion}
+\section{Conclusion}\label{sec:concl}
 [[ sec.CONCLUSION ]]
 \section*{Acknowledgements}
 [[ sec.ACKNOWLEDGEMENTS ]]
@@ -525,521 +228,128 @@ LATEX_TMPL = r"""
 \end{document}
 """
 
-
-def render_latex(
-    title: str, authors_df: pd.DataFrame, two_col: bool,
-    keywords: str, sections: dict, bibtex: str,
-    figs: list | None = None,
-) -> str:
-    env  = make_jinja_env()
+def render_latex(title, authors_list, two_col, keywords, sections, bibtex, figs=None):
+    env = jinja2.Environment(
+        block_start_string="[%", block_end_string="%]",
+        variable_start_string="[[", variable_end_string="]]",
+        autoescape=False
+    )
     tmpl = env.from_string(LATEX_TMPL)
-    author_list = []
-    first_author = ""
-    for _, row in authors_df.iterrows():
-        name = str(row.get("Name","")).strip()
-        if not name:
-            continue
-        if not first_author:
-            first_author = escape_for_latex(name)
-        author_list.append({
-            "name":  escape_for_latex(name),
-            "affil": escape_for_latex(str(row.get("Affiliation",""))),
-            "email": escape_for_latex(str(row.get("Email",""))),
+    
+    clean_authors = []
+    for a in authors_list:
+        clean_authors.append({
+            "name": escape_for_latex(a.get("name","")),
+            "affil": escape_for_latex(a.get("affil","")),
+            "email": escape_for_latex(a.get("email","")),
         })
-    short = (title[:52]+"...") if len(title) > 55 else title
+
     return tmpl.render(
         escaped_title=escape_for_latex(title),
-        short_title=escape_for_latex(short),
-        first_author=first_author,
         escaped_kw=escape_for_latex(keywords),
         kw_raw=keywords.strip(),
-        authors=author_list,
+        authors=clean_authors,
         two_col=two_col,
         sec=sections,
         bibtex=bibtex.strip(),
-        figs=figs or [],
+        figs=figs or []
     )
 
+def build_zip(latex_src, bibtex_data, generated_figs, uploaded_files):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("main.tex", latex_src)
+        if bibtex_data.strip():
+            zf.writestr("references.bib", bibtex_data.strip())
+        
+        # Write LLM generated charts
+        for fname, fbytes in generated_figs:
+            zf.writestr(fname, fbytes)
+            
+        # Write User Uploaded Figures
+        for file in uploaded_files:
+            if file.filename:
+                safe_name = secure_filename(file.filename)
+                file.seek(0)
+                zf.writestr(safe_name, file.read())
+                
+    buf.seek(0)
+    return buf
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PDF COMPILE
-# ─────────────────────────────────────────────────────────────────────────────
+# --- Routes ---
 
-def compile_pdf(
-    latex_src: str,
-    fig_bins: list[tuple[str, bytes]] | None = None,
-) -> tuple[bytes | None, str | None]:
-    with tempfile.TemporaryDirectory() as tmp:
-        p = Path(tmp)
-        tex = p / "paper.tex"
-        tex.write_text(latex_src, encoding="utf-8")
-        for fname, fdata in (fig_bins or []):
-            (p / fname).write_bytes(fdata)
-        cmd = ["pdflatex","-interaction=nonstopmode","-halt-on-error",
-               "-output-directory", tmp, str(tex)]
-        try:
-            for _ in range(2):
-                r = subprocess.run(cmd, capture_output=True, text=True,
-                                   cwd=tmp, timeout=120)
-        except FileNotFoundError:
-            return None, "pdflatex_not_found"
-        except subprocess.TimeoutExpired:
-            return None, "pdflatex timed out (>120s)."
-        pdf = p / "paper.pdf"
-        if pdf.exists() and pdf.stat().st_size > 0:
-            return pdf.read_bytes(), None
-        log = p / "paper.log"
-        if log.exists():
-            txt = log.read_text(encoding="utf-8", errors="replace")
-            errs = [l for l in txt.splitlines() if l.startswith("!")]
-            excerpt = "\n".join(errs[:30]) or txt[-2000:]
-        else:
-            excerpt = r.stderr[-2000:]
-        return None, excerpt
+@app.route("/")
+def index():
+    return render_template("index.html")
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SESSION STATE
-# ─────────────────────────────────────────────────────────────────────────────
-
-for _k, _v in {
-    "latex_src": None, "pdf_bytes": None, "sections": {},
-    "gen_error": None, "word_counts": {}, "total_words": 0,
-}.items():
-    if _k not in st.session_state:
-        st.session_state[_k] = _v
-
-# ─────────────────────────────────────────────────────────────────────────────
-# SIDEBAR
-# ─────────────────────────────────────────────────────────────────────────────
-
-with st.sidebar:
-    st.markdown("""
-    <div class="sci-logo">
-        <div class="sci-logo-icon">&#128300;</div>
-        <div><div class="sci-logo-text">SciWrite AI</div></div>
-        <div class="sci-logo-badge">v2.0</div>
-    </div>""", unsafe_allow_html=True)
-
-    st.markdown('<div class="sb-label">API Configuration</div>', unsafe_allow_html=True)
-    api_key = st.text_input("Gemini API Key", type="password",
-                            placeholder="AIzaSy...", label_visibility="collapsed")
-    if api_key:
-        st.markdown('<div style="font-size:0.72rem;color:#34d399;margin:-6px 0 8px;">&#10003; API key set</div>', unsafe_allow_html=True)
-    else:
-        st.markdown('<div style="font-size:0.72rem;color:#f87171;margin:-6px 0 8px;">&#9888; API key required</div>', unsafe_allow_html=True)
-
-    st.markdown('<div class="sb-label">Document Layout</div>', unsafe_allow_html=True)
-    layout_opt = st.radio("Layout", ["Single Column","Double Column"],
-                          index=0, horizontal=False, label_visibility="collapsed")
-    two_col = layout_opt == "Double Column"
-
-    st.markdown('<div class="sb-label">Paper Length</div>', unsafe_allow_html=True)
-    length_mode = st.radio("Length by", ["Pages","Words"],
-                           index=0, horizontal=True, label_visibility="collapsed")
-    if length_mode == "Pages":
-        target_pages = st.slider("Target pages", 4, 20, 8, 1,
-                                 help="Approx. A4/letter pages at 11pt.")
-        wpp = WORDS_PER_PAGE_DOUBLE if two_col else WORDS_PER_PAGE_SINGLE
-        est_words = target_pages * wpp
-    else:
-        est_words = st.slider("Target words", 1500, 12000, 5000, 500)
-        wpp = WORDS_PER_PAGE_DOUBLE if two_col else WORDS_PER_PAGE_SINGLE
-        target_pages = max(4, est_words // wpp)
-    st.markdown(
-        f'<div style="font-size:0.75rem;color:#5a6380;margin-top:4px;">'
-        f'~{est_words:,} words &nbsp;&middot;&nbsp; ~{target_pages} pages</div>',
-        unsafe_allow_html=True)
-
-    st.markdown('<div class="sb-label">Target Venue</div>', unsafe_allow_html=True)
-    venue = st.selectbox("Venue",
-        ["NeurIPS","ICML","ICLR","CVPR","ACL","Nature","Science",
-         "IEEE Transactions","AAAI","ECCV","EMNLP","Custom / Unspecified"],
-        index=0, label_visibility="collapsed")
-
-    st.markdown('<div class="sb-label">Upload Figures</div>', unsafe_allow_html=True)
-    uploaded_figs = st.file_uploader("Figures", type=["png","jpg","jpeg"],
-                                     accept_multiple_files=True,
-                                     label_visibility="collapsed")
-    if uploaded_figs:
-        st.caption(f"{len(uploaded_figs)} figure(s) loaded.")
-
-    st.divider()
-    st.markdown("""
-    <div style="font-size:0.7rem;color:#2e3450;line-height:1.9;padding:0 4px;">
-    <b style="color:#3d4566;">Workflow</b><br>
-    1 &middot; Fill Metadata &amp; Context<br>
-    2 &middot; Set length in sidebar<br>
-    3 &middot; Generate Paper<br>
-    4 &middot; Download .tex + .pdf<br>
-    5 &middot; Or open in Overleaf
-    </div>""", unsafe_allow_html=True)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# HERO
-# ─────────────────────────────────────────────────────────────────────────────
-
-st.markdown("""
-<div class="hero-wrap">
-<div class="hero-eyebrow">AI-Powered Academic Writing</div>
-<div class="hero-h1">SciWrite AI</div>
-<div class="hero-sub">Transform research notes into full-length, publication-ready papers.
-Gemini writes every section &mdash; equations, citations, tables &mdash; then compiles to PDF.</div>
-<div class="stat-row">
-<div class="stat-pill">&#128300; Gemini 2.0 Flash</div>
-<div class="stat-pill">&#128208; LaTeX + pdflatex</div>
-<div class="stat-pill">&#128196; Up to 20 pages</div>
-<div class="stat-pill">&#127963; 8 major venues</div>
-</div></div>""", unsafe_allow_html=True)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TABS
-# ─────────────────────────────────────────────────────────────────────────────
-
-tab_meta, tab_ctx, tab_bib, tab_gen = st.tabs([
-    "&#128203;  Metadata",
-    "&#128300;  Research Context",
-    "&#128218;  Bibliography",
-    "&#128640;  Generate & Export",
-])
-
-
-# ╔═══════════════════════════════════════════╗
-# ║  TAB 1 – METADATA                        ║
-# ╚═══════════════════════════════════════════╝
-with tab_meta:
-    st.markdown("""<div class="sec-header">
-    <div class="sec-icon sec-icon-blue">&#128203;</div>
-    <div><div class="sec-title">Document Metadata</div>
-    <div class="sec-sub">Title, authors, affiliations and keywords</div></div>
-    </div>""", unsafe_allow_html=True)
-
-    paper_title = st.text_input("Paper Title",
-        value="Deep Multimodal Fusion for Robust Temporal Sequence Modelling in Noisy Environments",
-        help="Full paper title. Special chars are auto-escaped for LaTeX.")
-
-    paper_keywords = st.text_input("Keywords (comma-separated)",
-        value="multimodal learning, temporal modelling, attention mechanisms, deep learning",
-        help="Used in PDF metadata and shown under the title.")
-
-    st.markdown("---")
-    st.markdown("""<div class="sec-header" style="margin-top:4px;">
-    <div class="sec-icon sec-icon-purple">&#128101;</div>
-    <div><div class="sec-title">Authors</div>
-    <div class="sec-sub">Add or remove rows with the + button below the table</div></div>
-    </div>""", unsafe_allow_html=True)
-
-    default_authors = pd.DataFrame({
-        "Name":        ["Alice J. Researcher",           "Bob K. Scholar"],
-        "Affiliation": ["MIT CSAIL, Cambridge, MA, USA", "Stanford NLP Group, Stanford, CA, USA"],
-        "Email":       ["aresearcher@mit.edu",           "bscholar@stanford.edu"],
-    })
-    authors_df = st.data_editor(
-        default_authors, use_container_width=True, num_rows="dynamic",
-        column_config={
-            "Name":        st.column_config.TextColumn("Full Name",     width="medium", required=True),
-            "Affiliation": st.column_config.TextColumn("Affiliation",   width="large"),
-            "Email":       st.column_config.TextColumn("Email Address", width="medium"),
-        }, key="authors_editor")
-
-    valid_authors = authors_df["Name"].str.strip().ne("").any()
-    if not valid_authors:
-        st.warning("Add at least one author to proceed.", icon="👤")
-
-
-# ╔═══════════════════════════════════════════╗
-# ║  TAB 2 – RESEARCH CONTEXT                ║
-# ╚═══════════════════════════════════════════╝
-with tab_ctx:
-    st.markdown("""<div class="sec-header">
-    <div class="sec-icon sec-icon-green">&#128300;</div>
-    <div><div class="sec-title">Research Context</div>
-    <div class="sec-sub">Notes or bullet points &mdash; Gemini expands everything into full academic prose</div></div>
-    </div>""", unsafe_allow_html=True)
-
-    col_l, col_r = st.columns(2, gap="large")
-    with col_l:
-        abstract_goals = st.text_area("Abstract Goals & Contributions", height=150,
-            placeholder="* Novel cross-modal attention architecture\n* +4.2% over SOTA on MSR-VTT\n* 3x fewer parameters than TransformerXL")
-        methodology_notes = st.text_area("Methodology", height=200,
-            placeholder="* Dual-stream encoder: visual (ViT-L) + textual (BERT-large)\n* Cross-modal attention at layers 4, 8, 12\n* Contrastive pre-training on 50M pairs\n* AdamW, lr=3e-4, cosine schedule, 100 epochs")
-    with col_r:
-        intro_bg = st.text_area("Introduction & Background", height=150,
-            placeholder="* Multimodal learning surged since ViLBERT (2019)\n* Temporal alignment in video+text remains unsolved\n* Existing methods fail under occlusion and noise")
-        results_data = st.text_area("Results & Experimental Data", height=200,
-            placeholder="* Ours 89.4% vs CLIP 85.2% on MSR-VTT R@1\n* Ablation: removing visual stream -6.1%\n* Latency: 14ms vs 42ms for nearest baseline\n* FLOPS: 18.3B vs 52.1B for TransformerXL")
-
-    extra_notes = st.text_area("Additional Notes / Special Instructions (optional)", height=80,
-        placeholder="e.g. Emphasise efficiency, add limitations subsection, reference dataset X specifically")
-
-
-# ╔═══════════════════════════════════════════╗
-# ║  TAB 3 – BIBLIOGRAPHY                    ║
-# ╚═══════════════════════════════════════════╝
-with tab_bib:
-    st.markdown("""<div class="sec-header">
-    <div class="sec-icon sec-icon-pink">&#128218;</div>
-    <div><div class="sec-title">Bibliography</div>
-    <div class="sec-sub">Paste raw BibTeX &mdash; cite keys are auto-extracted and given to Gemini</div></div>
-    </div>""", unsafe_allow_html=True)
-
-    bibtex_entries = st.text_area("BibTeX", height=420, label_visibility="collapsed",
-        placeholder=textwrap.dedent("""\
-            @inproceedings{vaswani2017attention,
-              title     = {Attention Is All You Need},
-              author    = {Vaswani, Ashish and others},
-              booktitle = {NeurIPS},
-              year      = {2017},
-            }
-            @article{devlin2019bert,
-              title   = {BERT: Pre-training of Deep Bidirectional Transformers},
-              author  = {Devlin, Jacob and others},
-              journal = {arXiv:1810.04805},
-              year    = {2019},
-            }"""))
-
-    if bibtex_entries.strip():
-        keys = re.findall(r"@\w+\{(\w+),", bibtex_entries)
-        if keys:
-            st.success(
-                f"&#10003;  {len(keys)} key(s): " +
-                "  /  ".join(f"`{k}`" for k in keys[:8]) +
-                ("  ..." if len(keys)>8 else ""))
-        else:
-            st.warning("No BibTeX keys detected.", icon="⚠️")
-    else:
-        st.info("Gemini will invent plausible cite keys if none are supplied.")
-
-
-# ╔═══════════════════════════════════════════╗
-# ║  TAB 4 – GENERATE & EXPORT               ║
-# ╚═══════════════════════════════════════════╝
-with tab_gen:
-    st.markdown("""<div class="sec-header">
-    <div class="sec-icon sec-icon-blue">&#128640;</div>
-    <div><div class="sec-title">Generate & Export</div>
-    <div class="sec-sub">One click &rarr; full paper &middot; LaTeX source &middot; compiled PDF</div></div>
-    </div>""", unsafe_allow_html=True)
-
-    wpp_d = WORDS_PER_PAGE_DOUBLE if two_col else WORDS_PER_PAGE_SINGLE
-    est = target_pages * wpp_d
-    st.markdown(f"""<div class="card-sm" style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:20px;">
-    <span style="font-size:0.78rem;color:#5a6380;">&#128208; <b style="color:#c9d1e0;">{layout_opt}</b></span>
-    <span style="font-size:0.78rem;color:#5a6380;">&#128196; <b style="color:#c9d1e0;">~{target_pages} pages</b></span>
-    <span style="font-size:0.78rem;color:#5a6380;">&#128221; <b style="color:#c9d1e0;">~{est:,} words</b></span>
-    <span style="font-size:0.78rem;color:#5a6380;">&#127963; <b style="color:#c9d1e0;">{venue}</b></span>
-    </div>""", unsafe_allow_html=True)
-
-    can_gen = bool(api_key) and bool(paper_title.strip()) and valid_authors
+@app.route("/api/generate", methods=["POST"])
+def generate():
+    # Because we handle files, data comes in via form-data
+    api_key = os.getenv("GEMINI_API_KEY") or request.form.get("api_key")
     if not api_key:
-        st.error("Enter your Gemini API key in the sidebar.")
-    if not paper_title.strip():
-        st.error("Paper title cannot be empty.", icon="✏️")
-    if not valid_authors:
-        st.error("Add at least one author in the Metadata tab.")
+        return jsonify({"error": "Gemini API Key missing"}), 400
 
-    gen_col, _ = st.columns([1,3])
-    with gen_col:
-        gen_btn = st.button("&#10024;  Generate Full Paper",
-                            disabled=not can_gen, use_container_width=True)
+    title = request.form.get("title", "Untitled Paper")
+    keywords = request.form.get("keywords", "")
+    venue = request.form.get("venue", "Custom / Unspecified")
+    layout = request.form.get("layout", "single")
+    two_col = (layout == "double")
+    
+    length_mode = request.form.get("length_mode", "pages")
+    length_val = int(request.form.get("length_val", 4 if length_mode == 'pages' else 2500))
+    
+    user_bibtex = request.form.get("bibtex", "")
+    
+    # Parse JSON strings passed via form-data
+    authors = json.loads(request.form.get("authors", "[]"))
+    notes = json.loads(request.form.get("notes", "{}"))
+    
+    uploaded_files = request.files.getlist('figures')
 
-   # ── PIPELINE ───────────────────────────────────────────────────────────
-    if gen_btn and can_gen:
-        # Purge PDF keys entirely and init clean state
-        for k in ["latex_src", "zip_payload", "sections", "gen_error", "word_counts", "total_words"]:
-            st.session_state[k] = {} if k in ("sections", "word_counts") else (0 if k == "total_words" else None)
+    sec_targets = compute_section_targets(length_mode, length_val, two_col)
+    compiled_notes = f"Abstract: {notes.get('abstract','')}\nIntro: {notes.get('intro','')}\nMethod: {notes.get('method','')}\nResults: {notes.get('results','')}\nExtra: {notes.get('extra','')}"
 
-        sec_targets = compute_section_targets(target_pages, two_col)
-        
-        progress = st.progress(0, text="Initializing SciWrite Architecture...")
-        status = st.empty()
+    try:
+        # 1. Fetch Literature
+        real_bibtex, arxiv_summaries = fetch_arxiv_literature(f"{title} {keywords}", 6)
+        combined_bibtex = f"{user_bibtex}\n\n{real_bibtex}".strip()
 
-        # Step 1: ArXiv Literature Grounding
-        status.markdown("**Step 1 / 4** &nbsp; Fetching real-world literature from arXiv...")
-        search_query = f"{paper_title} {paper_keywords}"
-        real_bibtex, arxiv_summaries = fetch_arxiv_literature(search_query, max_results=6)
-        
-        # Merge user bibtex with arXiv bibtex
-        combined_bibtex = f"{bibtex_entries}\n\n{real_bibtex}".strip()
-        progress.progress(15, text="Literature database anchored via arXiv API.")
+        # 2. Generate Chart
+        generated_charts = []
+        if notes.get("results"):
+            chart = generate_academic_chart(api_key, title, notes.get("results"), 1)
+            if chart: generated_charts.append(chart)
 
-        # Step 2: Matplotlib Rendering
-        status.markdown("**Step 2 / 4** &nbsp; Rendering empirical data figures...")
-        generated_charts_list = []
-        for idx in range(1, 3):
-            progress.progress(15 + (idx * 5), text=f"Rendering analytical chart {idx}...")
-            chart_asset = generate_academic_chart(api_key, paper_title, results_data, idx)
-            if chart_asset:
-                generated_charts_list.append(chart_asset)
-        progress.progress(25, text="Experimental graphics compiled.")
-
-        # Step 3: Sequential Academic Synthesis
-        status.markdown(f"**Step 3 / 4** &nbsp; Synthesizing ~{est:,} words sequentially...")
-        
-        sections_dict: dict[str, str] = {}
-        compiled_user_notes = f"Abstract: {abstract_goals}\nIntro: {intro_bg}\nMethod: {methodology_notes}\nResults: {results_data}\nExtra: {extra_notes}"
-        
-        try:
-            total_sections = len(SECTION_TAGS)
-            for i, tag in enumerate(SECTION_TAGS):
-                progress_val = 25 + int(60 * ((i + 1) / total_sections))
-                progress.progress(progress_val, text=f"Drafting section: {tag}...")
-                
-                prompt = generate_section_prompt(
-                    tag=tag, 
-                    title=paper_title, 
-                    arxiv_context=arxiv_summaries, 
-                    bibtex=combined_bibtex, 
-                    user_notes=compiled_user_notes, 
-                    previous_sections=sections_dict, 
-                    target_words=sec_targets.get(tag, 300)
-                )
-                
-                # Execute with 503 protection
-                section_text = call_gemini_with_retry(api_key, prompt)
-                
-                # Clean up LLM artifacts
-                section_text = clean_llm_latex_output(section_text) if 'clean_llm_latex_output' in globals() else section_text.replace("```latex", "").replace("```", "").strip()
-                sections_dict[tag] = section_text
-                
-            # Update metrics
-            wcs = {t: len(v.split()) for t, v in sections_dict.items()}
-            total = sum(wcs.values())
-            st.session_state.update(sections=sections_dict, word_counts=wcs, total_words=total)
-            
-        except Exception as e:
-            st.session_state["gen_error"] = str(e)
-            st.error(f"Generation Pipeline Failure: {e}", icon="❌")
-            st.stop()
-
-        # Step 4: Template Render & ZIP Export
-        status.markdown("**Step 4 / 4** &nbsp; Packaging Overleaf Project ZIP...")
-        progress.progress(90, text="Structuring graphic vectors and LaTeX templates...")
-        
-        fig_list: list[dict] = []
-        for uf in (uploaded_figs or []):
-            safe_name = re.sub(r"[^\w.\-]", "_", uf.name)
-            fig_list.append({"fn": safe_name, "cap": f"Empirical field observations: {uf.name}"})
-        for filename, _ in generated_charts_list:
-            fig_list.append({"fn": filename, "cap": "Programmatic verification matrix detailing analytical experimental parameters."})
-            
-        try:
-            latex_src = render_latex(
-                title=paper_title, authors_df=authors_df, two_col=two_col,
-                keywords=paper_keywords, sections=sections_dict,
-                bibtex=combined_bibtex, figs=fig_list
+        # 3. Generate Sections (Sequential)
+        sections_dict = {}
+        for tag in SECTION_TAGS:
+            prompt = generate_section_prompt(
+                tag, title, arxiv_summaries, combined_bibtex, compiled_notes, venue,
+                sections_dict, sec_targets.get(tag, 300)
             )
-            st.session_state["latex_src"] = latex_src
-            
-            zip_payload = generate_overleaf_zip(latex_src, combined_bibtex, uploaded_figs, generated_charts_list)
-            st.session_state["zip_payload"] = zip_payload
-            
-        except jinja2.TemplateError as je:
-            st.error(f"LaTeX Template Interpolation Error: {je}")
-            st.stop()
-            
-        progress.progress(100, text="Compilation Pipeline Complete.")
-        status.empty()
-        progress.empty()
+            out = call_gemini_with_retry(api_key, prompt)
+            sections_dict[tag] = clean_llm_latex_output(out)
+
+        # 4. Compile Figure List for LaTeX
+        fig_list = []
+        for file in uploaded_files:
+            if file.filename:
+                fig_list.append({"fn": secure_filename(file.filename), "cap": f"Uploaded observation: {file.filename}"})
+        for fname, _ in generated_charts:
+            fig_list.append({"fn": fname, "cap": "Programmatic analytical verification."})
+
+        # 5. Render and ZIP
+        latex_src = render_latex(title, authors, two_col, keywords, sections_dict, combined_bibtex, fig_list)
+        zip_buf = build_zip(latex_src, combined_bibtex, generated_charts, uploaded_files)
         
-        st.success(f"🚀 Project successfully structured! {total:,} words drafted. Overleaf ZIP archive is ready for production download.", icon="🎉")
+        return send_file(
+            zip_buf,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name="sciwrite_project.zip"
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-    # ── OUTPUT PANEL ───────────────────────────────────────────────────────
-    if st.session_state.get("latex_src"):
-        latex_src   = st.session_state["latex_src"]
-        pdf_bytes   = st.session_state.get("pdf_bytes")
-        sections    = st.session_state.get("sections", {})
-        word_counts = st.session_state.get("word_counts", {})
-        total_words = st.session_state.get("total_words", 0)
-
-        st.markdown("---")
-        sz_str = f"{len(pdf_bytes)//1024} KB PDF  &middot;  " if pdf_bytes else ""
-        st.markdown(f"""<div class="gen-status-bar">
-        <div class="gen-status-dot"></div>
-        <div class="gen-status-text">Paper ready</div>
-        <div class="gen-status-meta">{sz_str}{total_words:,} words &middot; {len(sections)} sections</div>
-        </div>""", unsafe_allow_html=True)
-
-        # Word count breakdown
-        with st.expander("&#128202;  Word count by section", expanded=False):
-            sec_targets_display = compute_section_targets(target_pages, two_col)
-            wc_rows = [
-                {"Section": t.replace("_"," ").title(),
-                 "Written": wc,
-                 "Target":  sec_targets_display.get(t, 0),
-                 "Coverage": f"{min(999, int(wc/max(1,sec_targets_display.get(t,1))*100))}%"}
-                for t, wc in word_counts.items() if wc > 0
-            ]
-            if wc_rows:
-                st.dataframe(pd.DataFrame(wc_rows), use_container_width=True, hide_index=True)
-
-        # ── EXPORT WORKSPACE PROJECT INTERACTIVE BUTTONS ────────────────────
-        st.markdown("### 📥 Downloads")
-        dl1, dl2, dl3 = st.columns(3, gap="medium")
-
-        with dl1:
-            st.markdown('<div class="dl-card"><div class="dl-card-title">📝 LaTeX Source</div><div class="dl-card-meta">.tex file &middot; single source file</div>', unsafe_allow_html=True)
-            st.download_button("📥 Download .tex Only",
-                data=latex_src.encode("utf-8"),
-                file_name="main.tex", mime="text/plain",
-                use_container_width=True)
-            st.markdown('</div>', unsafe_allow_html=True)
-
-        with dl2:
-            st.markdown('<div class="dl-card"><div class="dl-card-title">📦 Overleaf Ready Bundle</div>', unsafe_allow_html=True)
-            if st.session_state.get("zip_payload"):
-                st.markdown('<div class="dl-card-meta">.zip file &middot; Includes all graphs & citations</div>', unsafe_allow_html=True)
-                st.download_button("📥 Download Project ZIP",
-                    data=st.session_state["zip_payload"], 
-                    file_name="sciwrite_overleaf_project.zip",
-                    mime="application/zip", use_container_width=True)
-            else:
-                st.markdown('<div class="dl-card-meta">ZIP Archive Processing Error</div>', unsafe_allow_html=True)
-                st.button("ZIP Archive Unavailable", disabled=True, use_container_width=True)
-            st.markdown('</div>', unsafe_allow_html=True)
-
-        with dl3:
-            st.markdown('<div class="dl-card"><div class="dl-card-title">🌐 Open in Overleaf</div><div class="dl-card-meta">Edit, compile &amp; share online</div>', unsafe_allow_html=True)
-            st.markdown('<a class="overleaf-cta" href="https://www.overleaf.com/project/new/upload" target="_blank">↗ New Overleaf Project</a>', unsafe_allow_html=True)
-            st.caption("Click 'Upload' on Overleaf and drag the Project ZIP bundle straight in.")
-            st.markdown('</div>', unsafe_allow_html=True)
-
-
-        # Section prose preview
-        with st.expander("&#128209;  Preview generated sections", expanded=False):
-            for tag in SECTION_TAGS:
-                c  = sections.get(tag, "")
-                wc = word_counts.get(tag, 0)
-                if c:
-                    st.markdown(
-                        f'<div style="font-size:0.8rem;font-weight:700;color:#a78bfa;'
-                        f'margin:12px 0 4px;">{tag.replace("_"," ").title()} '
-                        f'<span style="font-weight:400;color:#3d4566;">({wc:,} words)</span></div>',
-                        unsafe_allow_html=True)
-                    st.code(c[:2000]+("..." if len(c)>2000 else ""), language="latex")
-
-        # Raw .tex
-        with st.expander("&#128295;  Raw LaTeX source", expanded=False):
-            st.code(latex_src, language="latex")
-
-    elif not gen_btn:
-        st.markdown("""
-        <div class="card" style="text-align:center;padding:48px 32px;">
-        <div style="font-size:2.8rem;margin-bottom:12px;">&#128300;</div>
-        <div style="font-size:1.05rem;font-weight:700;color:#c9d1e0;margin-bottom:8px;">Ready to generate</div>
-        <div style="font-size:0.85rem;color:#404866;max-width:400px;margin:0 auto;line-height:1.6;">
-        Complete the <strong>Metadata</strong> and <strong>Research Context</strong> tabs,
-        set paper length in the sidebar, then click <strong>Generate Full Paper</strong>.
-        </div></div>""", unsafe_allow_html=True)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FOOTER
-# ─────────────────────────────────────────────────────────────────────────────
-st.markdown("---")
-st.markdown(
-    '<div style="text-align:center;color:#1e2438;font-size:0.72rem;padding:8px 0 16px;">'
-    "SciWrite AI v2.0 &nbsp;&middot;&nbsp; Powered by Google Gemini 2.0 Flash &nbsp;&middot;&nbsp; "
-    "LaTeX compiled with pdflatex &nbsp;&middot;&nbsp; Built with Streamlit"
-    "</div>", unsafe_allow_html=True)
+if __name__ == "__main__":
+    app.run(debug=True)
