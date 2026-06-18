@@ -263,10 +263,8 @@ No external JS files.
 
 No external CSS files.
 
-Maintain dark theme.
-
+Maintain light theme, Whitish BG with blue accent colors overall professional pallete with rounded card based deisgn.
 Maintain professional SaaS UI.
-
 Maintain responsive layout.
 
 Use AJAX fetch APIs to communicate with Flask.
